@@ -1,69 +1,70 @@
-#include <ETH.h>
+
+#include <FirebaseESP32.h>
+#include <FirebaseESP32HTTPClient.h>
+#include <FirebaseJson.h>
+
+
 #include <WiFi.h>
-#include <WiFiAP.h>
 #include <WiFiClient.h>
-#include <WiFiGeneric.h>
-#include <WiFiMulti.h>
-#include <WiFiScan.h>
 #include <WiFiServer.h>
-#include <WiFiSTA.h>
-#include <WiFiType.h>
-#include <WiFiUdp.h>
-
-#include "Adafruit_MQTT.h"
-#include "Adafruit_MQTT_Client.h"
-#include "Adafruit_Sensor.h"
 
 
-//DHT VARIABLES
+
+// Set these to run example.
+
+#define WIFI_SSID "FAMILIA RODRIGUEZ" // nombre del wifi
+#define WIFI_PASSWORD "santiago11" // password del wifi
+#define FIREBASE_HOST "monitoreo-de-basuras.firebaseio.com"  //poner direccion de la database de Firebase sin https://  ni el ultimo /
+#define FIREBASE_AUTH "cq2e3K8bnvr4F3HtFA4DpABNJtGS9xMUfUbf3E7i"// poner codigo secreo. Configuracion proyecto-cuentas servicio-secretos de la base de datos
 
 
-#define AIO_SERVER      "io.adafruit.com"
-#define AIO_SERVERPORT  1883
-#define AIO_USERNAME  "sjmunozb"
-#define AIO_KEY  "aio_HByN27yAc4LZHSzdMsk1KShQ5wIO"
-#define DHTTYPE DHT11   // DHT 11
+// ultrasonico
+#define Pin_echo 6
+#define Pin_trig 7
+int duracion, distancia;
+bool full=false; 
+
 
 WiFiClient client;
 
-Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
-Adafruit_MQTT_Publish   temperature = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperature");
-Adafruit_MQTT_Publish   humidity = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/humidity");
-Adafruit_MQTT_Subscribe gasvalvemanualstatus = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/gasvalvemanualstatus");
+FirebaseData firebaseData;
 
-  
 // the setup function runs once when you press reset or power the board
 void setup() {
   
-
-  Serial2.begin(115200);
   Serial.begin(115200);
+
+  pinMode(Pin_echo, INPUT);     // define el pin 6 como entrada (echo)
+  pinMode(Pin_trig, OUTPUT);    // define el pin 7 como salida  (triger)
+  
+  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+ 
 
   // Now set up two tasks to run independently.
 
-  xTaskCreate(
-    Task_Uart,
-    "UART",
-    5000,            /* Stack size in bytes. */
-    NULL,             /* Parameter passed as input of the task */
-    6,                /* Priority of the task. */
-    NULL);            /* Task handle. */
+//  xTaskCreate(
+//    Task_Uart,
+//    "UART",
+//    5000,            /* Stack size in bytes. */
+//    NULL,             /* Parameter passed as input of the task */
+//    5,                /* Priority of the task. */
+//    NULL);            /* Task handle. */
 
   xTaskCreate(
-    Task_humedadYtemp,
-    "humedadYtemp",
+    Task_Ultrasonico,
+    "Ultrasonico",
     2000,            /* Stack size in bytes. */
     NULL,             /* Parameter passed as input of the task */
-    10,                /* Priority of the task. */
+    2,                /* Priority of the task. */
     NULL);            /* Task handle. */
 
 
   xTaskCreate(
-    Task_Enviar,
-    "Enviar",
-    5000,            /* Stack size in bytes. */
+    Task_Firebase_update,
+    "Firebase_update",
+    100000,            /* Stack size in bytes. */
     NULL,             /* Parameter passed as input of the task */
-    1,                /* Priority of the task. */
+    3,                /* Priority of the task. */
     NULL);            /* Task handle. */
 
 
@@ -72,36 +73,29 @@ void setup() {
     "Conectar",
     4000,            /* Stack size in bytes. */
     NULL,             /* Parameter passed as input of the task */
-    4,                /* Priority of the task. */
-    NULL);            /* Task handle. */
-
-  xTaskCreate(
-    Task_mqtt,
-    "mqtt",
-    2000,            /* Stack size in bytes. */
-    NULL,             /* Parameter passed as input of the task */
-    5,                /* Priority of the task. */
+    1,                /* Priority of the task. */
     NULL);            /* Task handle. */
 
 //  xTaskCreate(
-//    Task_estado,
-//    "estado",
-//    5000,            /* Stack size in bytes. */
+//    Task_Firebase_enviar,
+//    "Firebase_enviar",
+//    2000,            /* Stack size in bytes. */
 //    NULL,             /* Parameter passed as input of the task */
-//    2,                /* Priority of the task. */
+//    4,                /* Priority of the task. */
 //    NULL);            /* Task handle. */
-//
-//  xTaskCreate(
-//    Task_reset,
-//    "reset",
-//    5000,            /* Stack size in bytes. */
-//    NULL,             /* Parameter passed as input of the task */
-//    3,                /* Priority of the task. */
-//    NULL);            /* Task handle. */
+
 
 
   // Now the task scheduler, which takes over control of scheduling individual tasks, is automatically started.
 }
+
+
+int n = 0;
+
+
+
+
+
 
 void loop()
 {
@@ -115,54 +109,40 @@ void Task_Uart(void * pvParameters)
 {
   while (1) {
     
-  if(Serial.read() == '0')
-  {
-    
-    if (temperature.publish(temperatureValue)) {
-      Serial.println("Temperature data sent: ");
-      Serial.println(temperatureValue);
-    } else {
-      Serial.println("T");
-      Serial.println(temperatureValue);
-    }
-    if (humidity.publish(humidityValue)) {
-      Serial.println("Humidity data sent: ");
-      Serial.println(humidityValue);
-    } else {
-      Serial.println("H");
-      Serial.println(humidityValue);
-    }
-  }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+      vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
+
 
 int ret;
 int retries = 3;
 
-void Task_mqtt(void * pvParameters)
+
+void Task_Firebase_enviar(void * pvParameters)
 {
   while (1) {
+if (Firebase.getFile(firebaseData, StorageType::SPIFFS, "/test/file_data", "/test.txt"))
+{
+  //SPIFFS.begin(); //not need to begin again due to it has been called in function.
+  File file = SPIFFS.open("/test.txt", "r");
 
-    if (mqtt.connected()) {
-      Serial.println("MQTT conected");
-      vTaskDelay(10000 / portTICK_PERIOD_MS);
-    }
-    while ((ret = mqtt.connect()) != 0) {
-      mqtt.disconnect();
-      delay(2000);
-      Serial.println("CONECTING");
-      retries--;
+  while (file.available())
+  {     
+    Serial.print(file.read(), HEX);     
+  }    
+  file.close();
+  Serial.println();
 
-      if (retries == 0) {
-        retries=3;
-        Serial.println("MQTT Error");
-        vTaskDelay(8000 / portTICK_PERIOD_MS);
-      }
-    }
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
+} else {
+  Serial.println(firebaseData.fileTransferError());
 }
+
+Firebase.deleteNode(firebaseData, "/test/append");
+
+
+   }
+}
+
 
 void Task_conectar(void * pvParameters)
 {
@@ -173,7 +153,7 @@ void Task_conectar(void * pvParameters)
       vTaskDelay(10000 / portTICK_PERIOD_MS);
     }  else {
       Serial.println("START");
-      WiFi.begin("Embebidos-Hogar_Inteligente", "bonnechance");
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
       while ((!(WiFi.status() == WL_CONNECTED))) {
         delay(300);
         Serial.print(".");
@@ -188,38 +168,57 @@ void Task_conectar(void * pvParameters)
 
 
 
-void Task_humedadYtemp(void * pvParameters)
+void Task_Ultrasonico(void * pvParameters)
 {
   while (1) {
-    
-    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    digitalWrite(Pin_trig, LOW);
+  vTaskDelay(1 / portTICK_PERIOD_MS);
+  digitalWrite(Pin_trig, HIGH);   // genera el pulso de triger por 10ms
+  vTaskDelay(10 / portTICK_PERIOD_MS);
+  digitalWrite(Pin_trig, LOW);
+  
+  duracion = pulseIn(Pin_echo, HIGH);
+  distancia = (duracion/2) / 29;            // calcula la distancia en centimetros
+  
+  if (distancia >= 500 || distancia <= 0){  // si la distancia es mayor a 500cm o menor a 0cm 
+    Serial.println("---");                  // no mide nada
+  }
+  else {
+    Serial.print(distancia);           // envia el valor de la distancia por el puerto serial
+    Serial.println("cm");              // le coloca a la distancia los centimetros "cm"
+  } 
+  
+   if (distancia <= 5 && distancia >= 1){
+    Serial.println("El contenedor está lleno");         // envia la palabra Alarma por el puerto serial
+    full=true;
+    }
+    else{
+      full=false;
+    }
+  vTaskDelay(10000 / portTICK_PERIOD_MS);
   }
 }
 
 int estado=0;
 
-void Task_Enviar(void * pvParameters)
+void Task_Firebase_update(void * pvParameters)
 {
   while (1) {
-    Adafruit_MQTT_Subscribe *subscription_gasValve;
-    while ((subscription_gasValve = mqtt.readSubscription(100))) {
-      if (subscription_gasValve == &gasvalvemanualstatus) {
-        Serial.println(((char *)gasvalvemanualstatus.lastread));
-        String inString = (char *)gasvalvemanualstatus.lastread;
-        if (inString == "ON") {
-          Serial.print("ON");
-          Serial2.print("1");
-          digitalWrite(2, LOW);
+FirebaseJson updateData;
+updateData.set("Full",full);
+updateData.set("Nivel",distancia);
 
-          vTaskDelay(1000 / portTICK_PERIOD_MS);
-        } else {
-          Serial.print("OFF");
-          Serial2.print("0");
-          digitalWrite(2, HIGH);
-          vTaskDelay(1000 / portTICK_PERIOD_MS);
-        }
-      }
-    }
+if (Firebase.updateNode(firebaseData, "/Contenedores/000002", updateData)) {
+
+  Serial.println(firebaseData.dataPath());
+
+  Serial.println(firebaseData.dataType());
+
+  Serial.println(firebaseData.jsonString()); 
+
+} else {
+  Serial.println(firebaseData.errorReason());
+}
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
